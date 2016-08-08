@@ -11,9 +11,14 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/mholt/caddy"
 	"github.com/mholt/caddy/caddyhttp/httpserver"
+)
+
+var (
+	gzipWriterPools = map[int]*sync.Pool{}
 )
 
 func init() {
@@ -21,6 +26,24 @@ func init() {
 		ServerType: "http",
 		Action:     setup,
 	})
+	initGzipWriterPool(gzip.DefaultCompression)
+	for level := gzip.BestCompression; level <= gzip.BestSpeed; level++ {
+		initGzipWriterPool(level)
+	}
+}
+
+func initGzipWriterPool(level int) {
+	gzipWriterPools[level] = &sync.Pool{
+		New: func() interface{} {
+			f, err := gzip.NewWriterLevel(ioutil.Discard, level)
+			if err != nil {
+				// This should never happen since gzip.Writer generators are
+				// created statically.
+				panic("invalid gzip.Writer level")
+			}
+			return f
+		},
+	}
 }
 
 // Gzip is a middleware type which gzips HTTP responses. It is
@@ -60,12 +83,9 @@ outer:
 		// gzipWriter modifies underlying writer at init,
 		// use a discard writer instead to leave ResponseWriter in
 		// original form.
-		gzipWriter, err := newWriter(c, ioutil.Discard)
-		if err != nil {
-			// should not happen
-			return http.StatusInternalServerError, err
-		}
-		defer gzipWriter.Close()
+		level := c.Level
+		gzipWriter := getWriter(level, ioutil.Discard)
+		defer putWriter(level, gzipWriter)
 		gz := &gzipResponseWriter{Writer: gzipWriter, ResponseWriter: w}
 
 		var rw http.ResponseWriter
@@ -96,14 +116,28 @@ outer:
 	return g.Next.ServeHTTP(w, r)
 }
 
-// newWriter create a new Gzip Writer based on the compression level.
+// getWriter gets a gzip.Writer from the appropriate sync.Pool based on the
+// compression level.
+func getWriter(level int, w io.Writer) *gzip.Writer {
+	level = normalizeGzipLevel(level)
+	gzipWriter := gzipWriterPools[level].Get().(*gzip.Writer)
+	gzipWriter.Reset(w)
+	return gzipWriter
+}
+
+// putWriter puts the gzip.Writer back to the appropriate sync.Pool.
+func putWriter(level int, gzipWriter *gzip.Writer) {
+	gzipWriterPools[normalizeGzipLevel(level)].Put(gzipWriter)
+}
+
+// normalizeGzip level returns a valid gzip level.
 // If the level is valid (i.e. between 1 and 9), it uses the level.
 // Otherwise, it uses default compression level.
-func newWriter(c Config, w io.Writer) (*gzip.Writer, error) {
-	if c.Level >= gzip.BestSpeed && c.Level <= gzip.BestCompression {
-		return gzip.NewWriterLevel(w, c.Level)
+func normalizeGzipLevel(level int) int {
+	if level >= gzip.BestSpeed && level <= gzip.BestCompression {
+		return level
 	}
-	return gzip.NewWriter(w), nil
+	return gzip.DefaultCompression
 }
 
 // gzipResponeWriter wraps the underlying Write method

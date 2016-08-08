@@ -1,6 +1,7 @@
 package gzip
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -76,6 +77,20 @@ func TestGzipHandler(t *testing.T) {
 		if err != nil {
 			t.Error(err)
 		}
+	}
+
+	gz.Configs[0].Level = gzip.BestCompression
+	w = httptest.NewRecorder()
+	gz.Next = nextFunc(false)
+	url := "/file.abc"
+	r, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		t.Error(err)
+	}
+	r.Header.Set("Accept-Encoding", "gzip")
+	_, err = gz.ServeHTTP(w, r)
+	if err != nil {
+		t.Error(err)
 	}
 }
 
